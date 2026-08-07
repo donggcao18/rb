@@ -1,0 +1,75 @@
+data:
+  raw_train: ../../theVault-multilabel/Ruby_train_r32.0.json
+  raw_test: ../../theVault-multilabel/Ruby_test_r32.0.json
+  prepared_dir: outputs/vault-ruby/data
+  dev_fraction: 0.1
+  global_qrels: false
+  allow_missing_documents: false
+  initial_hard_negatives: null
+
+output:
+  dir: outputs/vault-ruby/checkpoints
+
+runtime:
+  seed: 13
+  precision: bf16
+  num_workers: 8
+  log_every: 50
+
+retriever:
+  model_name: microsoft/codebert-base
+  share_weights: false
+  pooling: cls
+  normalize_embeddings: false
+  include_metadata: true
+  query_max_length: 64
+  code_max_length: 256
+  per_device_batch_size: 64
+  gradient_accumulation: 1
+  max_positives_per_query: 2
+  hard_negatives_per_query: 0
+  warmup_epochs: 3
+  max_steps: 0
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+ranker:
+  model_name: microsoft/codebert-base
+  max_length: 384
+  per_device_batch_size: 8
+  gradient_accumulation: 4
+  max_positives_per_query: 2
+  negatives_per_query: 15
+  warmup_epochs: 2
+  max_steps: 0
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  inference_batch_size: 128
+
+mining:
+  top_k: 100
+  negative_pool_size: 100
+  negatives_per_query: 15
+  corpus_batch_size: 512
+  query_batch_size: 512
+
+ar2:
+  rounds: 5
+  per_device_batch_size: 8
+  max_positives_per_query: 2
+  ranker_steps_per_round: 500
+  retriever_steps_per_round: 1500
+  ranker_gradient_accumulation: 8
+  retriever_gradient_accumulation: 8
+  ranker_learning_rate: 1.0e-6
+  retriever_learning_rate: 1.0e-5
+  adv_lambda: 0.5
+  retriever_temperature: 1.0
+  ranker_temperature: 1.0
+
+evaluation:
+  cutoffs: [1, 5, 10, 100]

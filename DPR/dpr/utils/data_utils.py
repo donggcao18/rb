@@ -209,6 +209,7 @@ class ShardedDataIterator(object):
         shuffle_seed: int = 0,
         offset: int = 0,
         strict_batch_size: bool = False,
+        keep_partial_batches: bool = False,
     ):
 
         self.dataset = dataset
@@ -219,6 +220,7 @@ class ShardedDataIterator(object):
         self.batch_size = batch_size
         self.shuffle_seed = shuffle_seed
         self.strict_batch_size = strict_batch_size
+        self.keep_partial_batches = keep_partial_batches
         self.shard_start_idx = -1
         self.shard_end_idx = -1
         self.max_iterations = 0
@@ -234,7 +236,7 @@ class ShardedDataIterator(object):
         self.shard_start_idx = shard_id * samples_per_shard
         self.shard_end_idx = min(self.shard_start_idx + samples_per_shard, total_size)
 
-        if self.strict_batch_size:
+        if self.strict_batch_size or self.keep_partial_batches:
             self.max_iterations = math.ceil(samples_per_shard / self.batch_size)
         else:
             self.max_iterations = int(samples_per_shard / self.batch_size)
@@ -287,7 +289,7 @@ class ShardedDataIterator(object):
             items_idxs = shard_indices[i : i + self.batch_size]
             if self.strict_batch_size and len(items_idxs) < self.batch_size:
                 logger.debug("Extending batch to max size")
-                items_idxs.extend(shard_indices[0 : self.batch_size - len(items)])
+                items_idxs.extend(shard_indices[0 : self.batch_size - len(items_idxs)])
             self.iteration += 1
             items = [self.dataset[idx] for idx in items_idxs]
             yield items

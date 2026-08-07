@@ -26,6 +26,7 @@ from torch import nn
 
 from dpr.utils.data_utils import RepTokenSelector
 from dpr.data.qa_validation import calculate_matches, calculate_chunked_matches, calculate_matches_from_meta
+from dpr.data.multilabel_metrics import evaluate_multilabel_retrieval
 from dpr.data.retriever_data import KiltCsvCtxSrc, TableChunk
 from dpr.indexer.faiss_indexers import (
     DenseIndexer,
@@ -379,6 +380,49 @@ def save_results(
     logger.info("Saved results * scores  to %s", out_file)
 
 
+def save_multilabel_results(
+    passages: Dict[object, Tuple[str, str]],
+    questions: List[str],
+    query_ids: List[str],
+    positive_ids: List[List[str]],
+    top_passages_and_scores: List[Tuple[List[object], List[float]]],
+    per_query_metrics: List[Dict[str, float]],
+    relevance_flags: List[List[bool]],
+    aggregate_metrics: Dict[str, float],
+    out_file: str,
+):
+    records = []
+    for index, question in enumerate(questions):
+        result_ids, result_scores = top_passages_and_scores[index]
+        contexts = []
+        for rank, (doc_id, score) in enumerate(zip(result_ids, result_scores), start=1):
+            passage = passages[doc_id]
+            contexts.append(
+                {
+                    "rank": rank,
+                    "id": str(doc_id),
+                    "title": passage[1],
+                    "text": passage[0],
+                    "score": str(score),
+                    "is_relevant": relevance_flags[index][rank - 1],
+                }
+            )
+        records.append(
+            {
+                "query_id": query_ids[index],
+                "question": question,
+                "positive_ids": positive_ids[index],
+                "metrics": per_query_metrics[index],
+                "ctxs": contexts,
+            }
+        )
+    payload = {"aggregate_metrics": aggregate_metrics, "results": records}
+    with open(out_file, "w", encoding="utf-8") as writer:
+        json.dump(payload, writer, ensure_ascii=False, indent=2)
+        writer.write("\n")
+    logger.info("Saved multi-label retrieval results to %s", out_file)
+
+
 # TODO: unify with save_results
 def save_results_from_meta(
     questions: List[str],
@@ -503,6 +547,8 @@ def main(cfg: DictConfig):
     questions = []
     questions_text = []
     question_answers = []
+    question_ids = []
+    question_positive_ids = []
 
     if not cfg.qa_dataset:
         logger.warning("Please specify qa_dataset to use")
@@ -520,6 +566,8 @@ def main(cfg: DictConfig):
         question, answers = qa_sample.query, qa_sample.answers
         questions.append(question)
         question_answers.append(answers)
+        question_ids.append(str(qa_sample.id))
+        question_positive_ids.append([str(value) for value in getattr(qa_sample, "positive_ids", [])])
 
     logger.info("questions len %d", len(questions))
     logger.info("questions_text len %d", len(questions_text))
@@ -548,6 +596,14 @@ def main(cfg: DictConfig):
         logger.info("Using custom representation token selector")
         retriever.selector = qa_src.selector
 
+    id_prefixes = []
+    ctx_sources = []
+    for ctx_key in cfg.ctx_datatsets or []:
+        ctx_src = hydra.utils.instantiate(cfg.ctx_sources[ctx_key])
+        id_prefixes.append(ctx_src.id_prefix)
+        ctx_sources.append(ctx_src)
+        logger.info("ctx_sources: %s", type(ctx_src))
+
     index_path = cfg.index_path
     if cfg.rpc_retriever_cfg_file and cfg.rpc_index_id:
         retriever.load_index(cfg.rpc_index_id)
@@ -556,14 +612,6 @@ def main(cfg: DictConfig):
         retriever.index.deserialize(index_path)
     else:
         # send data for indexing
-        id_prefixes = []
-        ctx_sources = []
-        for ctx_src in cfg.ctx_datatsets:
-            ctx_src = hydra.utils.instantiate(cfg.ctx_sources[ctx_src])
-            id_prefixes.append(ctx_src.id_prefix)
-            ctx_sources.append(ctx_src)
-            logger.info("ctx_sources: %s", type(ctx_src))
-
         logger.info("id_prefixes per dataset: %s", id_prefixes)
 
         # index all passages
@@ -614,7 +662,29 @@ def main(cfg: DictConfig):
             )
     else:
         all_passages = get_all_passages(ctx_sources)
-        if cfg.validate_as_tables:
+        validation_mode = getattr(cfg, "validation_mode", "answer_match")
+        if validation_mode == "document_ids":
+            if not all(question_positive_ids):
+                raise ValueError("document_ids validation requires positive_ids for every query")
+            aggregate_metrics, per_query_metrics, questions_doc_hits = evaluate_multilabel_retrieval(
+                question_positive_ids,
+                top_results_and_scores,
+                getattr(cfg, "metric_cutoffs", [1, 5, 10, 20, 100]),
+            )
+            logger.info("Multi-label retrieval metrics: %s", json.dumps(aggregate_metrics, sort_keys=True))
+            if cfg.out_file:
+                save_multilabel_results(
+                    all_passages,
+                    questions_text if questions_text else questions,
+                    question_ids,
+                    question_positive_ids,
+                    top_results_and_scores,
+                    per_query_metrics,
+                    questions_doc_hits,
+                    aggregate_metrics,
+                    cfg.out_file,
+                )
+        elif cfg.validate_as_tables:
 
             questions_doc_hits = validate_tables(
                 all_passages,
@@ -633,7 +703,7 @@ def main(cfg: DictConfig):
                 cfg.match,
             )
 
-        if cfg.out_file:
+        if cfg.out_file and validation_mode != "document_ids":
             save_results(
                 all_passages,
                 questions_text if questions_text else questions,

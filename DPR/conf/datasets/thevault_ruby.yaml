@@ -1,0 +1,14 @@
+# @package _group_
+
+ruby_train:
+  _target_: dpr.data.thevault_data.TheVaultMultiLabelDataset
+  file: ${hydra:runtime.cwd}/data/thevault/ruby/train.jsonl
+
+ruby_dev:
+  _target_: dpr.data.thevault_data.TheVaultMultiLabelDataset
+  file: ${hydra:runtime.cwd}/data/thevault/ruby/dev.jsonl
+
+ruby_test:
+  _target_: dpr.data.thevault_data.TheVaultMultiLabelQASrc
+  file: ${hydra:runtime.cwd}/data/thevault/ruby/test.jsonl
+

@@ -106,9 +106,16 @@ class DenseFlatIndexer(DenseIndexer):
 
     def search_knn(self, query_vectors: np.array, top_docs: int) -> List[Tuple[List[object], List[float]]]:
         scores, indexes = self.index.search(query_vectors, top_docs)
-        # convert to external ids
-        db_ids = [[self.index_id_to_db_id[i] for i in query_top_idxs] for query_top_idxs in indexes]
-        result = [(db_ids[i], scores[i]) for i in range(len(db_ids))]
+        # FAISS pads with index -1 when top_docs exceeds the corpus size. Filter
+        # those entries instead of accidentally mapping -1 to the last document.
+        result = []
+        for query_indexes, query_scores in zip(indexes, scores):
+            valid = [
+                (self.index_id_to_db_id[index], score)
+                for index, score in zip(query_indexes, query_scores)
+                if index >= 0
+            ]
+            result.append(([item[0] for item in valid], [item[1] for item in valid]))
         return result
 
     def get_index_name(self):

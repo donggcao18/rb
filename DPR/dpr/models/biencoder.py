@@ -36,6 +36,9 @@ BiEncoderBatch = collections.namedtuple(
         "is_positive",
         "hard_negatives",
         "encoder_type",
+        "ctx_ids",
+        "positive_doc_ids",
+        "multi_positive",
     ],
 )
 # TODO: it is only used by _select_span_with_token. Move them to utils
@@ -149,6 +152,8 @@ class BiEncoder(nn.Module):
         shuffle_positives: bool = False,
         hard_neg_fallback: bool = True,
         query_token: str = None,
+        multi_positive: bool = False,
+        max_positives: int = 0,
     ) -> BiEncoderBatch:
         """
         Creates a batch of the biencoder training tuple.
@@ -165,16 +170,26 @@ class BiEncoder(nn.Module):
         ctx_tensors = []
         positive_ctx_indices = []
         hard_neg_ctx_indices = []
+        context_doc_ids = []
+        positive_doc_ids = []
 
         for sample in samples:
             # ctx+ & [ctx-] composition
             # as of now, take the first(gold) ctx+ only
 
-            if shuffle and shuffle_positives:
+            if multi_positive:
+                selected_positive_ctxs = list(sample.positive_passages)
+                if shuffle:
+                    random.shuffle(selected_positive_ctxs)
+                if max_positives and max_positives > 0:
+                    selected_positive_ctxs = selected_positive_ctxs[:max_positives]
+                if not selected_positive_ctxs:
+                    raise ValueError("A multi-positive sample has no positive passages")
+            elif shuffle and shuffle_positives:
                 positive_ctxs = sample.positive_passages
-                positive_ctx = positive_ctxs[np.random.choice(len(positive_ctxs))]
+                selected_positive_ctxs = [positive_ctxs[np.random.choice(len(positive_ctxs))]]
             else:
-                positive_ctx = sample.positive_passages[0]
+                selected_positive_ctxs = [sample.positive_passages[0]]
 
             neg_ctxs = sample.negative_passages
             hard_neg_ctxs = sample.hard_negative_passages
@@ -191,9 +206,9 @@ class BiEncoder(nn.Module):
             neg_ctxs = neg_ctxs[0:num_other_negatives]
             hard_neg_ctxs = hard_neg_ctxs[0:num_hard_negatives]
 
-            all_ctxs = [positive_ctx] + neg_ctxs + hard_neg_ctxs
-            hard_negatives_start_idx = 1
-            hard_negatives_end_idx = 1 + len(hard_neg_ctxs)
+            all_ctxs = selected_positive_ctxs + neg_ctxs + hard_neg_ctxs
+            hard_negatives_start_idx = len(selected_positive_ctxs) + len(neg_ctxs)
+            hard_negatives_end_idx = hard_negatives_start_idx + len(hard_neg_ctxs)
 
             current_ctxs_len = len(ctx_tensors)
 
@@ -203,7 +218,18 @@ class BiEncoder(nn.Module):
             ]
 
             ctx_tensors.extend(sample_ctxs_tensors)
-            positive_ctx_indices.append(current_ctxs_len)
+            sample_positive_indices = list(
+                range(current_ctxs_len, current_ctxs_len + len(selected_positive_ctxs))
+            )
+            positive_ctx_indices.append(sample_positive_indices if multi_positive else sample_positive_indices[0])
+            context_doc_ids.extend([str(getattr(ctx, "id", "")) for ctx in all_ctxs])
+            sample_positive_doc_ids = getattr(sample, "positive_doc_ids", None)
+            if sample_positive_doc_ids:
+                positive_doc_ids.append([str(value) for value in sample_positive_doc_ids])
+            else:
+                positive_doc_ids.append(
+                    [str(getattr(ctx, "id", "")) for ctx in selected_positive_ctxs]
+                )
             hard_neg_ctx_indices.append(
                 [
                     i
@@ -238,6 +264,9 @@ class BiEncoder(nn.Module):
             positive_ctx_indices,
             hard_neg_ctx_indices,
             "question",
+            context_doc_ids,
+            positive_doc_ids,
+            multi_positive,
         )
 
     def load_state(self, saved_state: CheckpointState, strict: bool = True):
@@ -296,6 +325,54 @@ class BiEncoderNllLoss(object):
     @staticmethod
     def get_similarity_function():
         return dot_product_scores
+
+
+class BiEncoderMultiPositiveLoss(object):
+    """Cross entropy against a uniform distribution over every relevant context."""
+
+    def __init__(self, temperature: float = 1.0):
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        self.temperature = temperature
+
+    def calc(
+        self,
+        q_vectors: T,
+        ctx_vectors: T,
+        positive_idx_per_question: List[List[int]],
+        ctx_ids: List[str],
+        positive_doc_ids: List[List[str]],
+        loss_scale: float = None,
+    ) -> Tuple[T, int]:
+        scores = dot_product_scores(q_vectors, ctx_vectors) / self.temperature
+        if len(q_vectors.size()) > 1:
+            scores = scores.view(q_vectors.size(0), -1)
+
+        positive_mask = torch.zeros_like(scores, dtype=torch.bool)
+        for query_idx, positive_indices in enumerate(positive_idx_per_question):
+            if isinstance(positive_indices, int):
+                positive_indices = [positive_indices]
+            for context_idx in positive_indices:
+                positive_mask[query_idx, context_idx] = True
+            relevant_ids = set(str(value) for value in positive_doc_ids[query_idx])
+            if relevant_ids:
+                for context_idx, context_id in enumerate(ctx_ids):
+                    if str(context_id) in relevant_ids:
+                        positive_mask[query_idx, context_idx] = True
+
+        positives_per_query = positive_mask.sum(dim=1)
+        if torch.any(positives_per_query == 0):
+            missing = (positives_per_query == 0).nonzero().view(-1).tolist()
+            raise ValueError("No positive context was found for queries {}".format(missing))
+
+        log_probs = F.log_softmax(scores, dim=1)
+        targets = positive_mask.to(log_probs.dtype) / positives_per_query.unsqueeze(1).to(log_probs.dtype)
+        loss = -(targets * log_probs).sum(dim=1).mean()
+        predictions = torch.argmax(scores, dim=1)
+        correct = positive_mask.gather(1, predictions.unsqueeze(1)).sum()
+        if loss_scale:
+            loss.mul_(loss_scale)
+        return loss, correct
 
 
 def _select_span_with_token(text: str, tensorizer: Tensorizer, token_str: str = "[START_ENT]") -> T:

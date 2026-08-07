@@ -26,10 +26,11 @@ TableChunk = collections.namedtuple("TableChunk", ["text", "title", "table_id"])
 
 
 class QASample:
-    def __init__(self, query: str, id, answers: List[str]):
+    def __init__(self, query: str, id, answers: List[str], positive_ids: List[str] = None):
         self.query = query
         self.id = id
         self.answers = answers
+        self.positive_ids = positive_ids or []
 
 
 class RetrieverData(torch.utils.data.Dataset):

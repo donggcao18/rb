@@ -25,7 +25,7 @@ from torch import Tensor as T
 from torch import nn
 
 from dpr.models import init_biencoder_components
-from dpr.models.biencoder import BiEncoderNllLoss, BiEncoderBatch
+from dpr.models.biencoder import BiEncoderNllLoss, BiEncoderMultiPositiveLoss, BiEncoderBatch
 from dpr.options import (
     setup_cfg_gpu,
     set_seed,
@@ -95,6 +95,7 @@ class BiEncoderTrainer(object):
         self.scheduler_state = None
         self.best_validation_result = None
         self.best_cp_name = None
+        self.saved_checkpoints = []
         self.cfg = cfg
         self.ds_cfg = BiencoderDatasetsCfg(cfg)
 
@@ -132,6 +133,7 @@ class BiEncoderTrainer(object):
                 shuffle=shuffle,
                 shuffle_seed=shuffle_seed,
                 offset=offset,
+                keep_partial_batches=getattr(self.cfg.train, "keep_partial_batches", False),
             )
             for ds in hydra_datasets
         ]
@@ -234,6 +236,7 @@ class BiEncoderTrainer(object):
         total_loss = 0.0
         start_time = time.time()
         total_correct_predictions = 0
+        validated_samples = 0
         num_hard_negatives = cfg.train.hard_negatives
         num_other_negatives = cfg.train.other_negatives
         log_result_step = cfg.train.log_batch_step
@@ -244,6 +247,7 @@ class BiEncoderTrainer(object):
         for i, samples_batch in enumerate(data_iterator.iterate_ds_data()):
             if isinstance(samples_batch, Tuple):
                 samples_batch, dataset = samples_batch
+            validated_samples += len(samples_batch)
             logger.info("Eval step: %d ,rnk=%s", i, cfg.local_rank)
 
             biencoder_input = biencoder.create_biencoder_input(
@@ -253,6 +257,8 @@ class BiEncoderTrainer(object):
                 num_hard_negatives,
                 num_other_negatives,
                 shuffle=False,
+                multi_positive=getattr(cfg.train, "multi_positive", False),
+                max_positives=getattr(cfg.train, "max_positives_per_query", 0),
             )
 
             # get the token to be used for representation selection
@@ -279,8 +285,11 @@ class BiEncoderTrainer(object):
                     loss.item(),
                 )
 
+        if batches == 0:
+            logger.warning("Validation dataset is empty")
+            return float("inf")
         total_loss = total_loss / batches
-        total_samples = batches * cfg.train.dev_batch_size * self.distributed_factor
+        total_samples = validated_samples * self.distributed_factor
         correct_ratio = float(total_correct_predictions / total_samples)
         logger.info(
             "NLL Validation: loss = %f. correct prediction ratio  %d/%d ~  %f",
@@ -340,6 +349,8 @@ class BiEncoderTrainer(object):
                 num_hard_negatives,
                 num_other_negatives,
                 shuffle=False,
+                multi_positive=getattr(cfg.train, "multi_positive", False),
+                max_positives=getattr(cfg.train, "max_positives_per_query", 0),
             )
             total_ctxs = len(ctx_represenations)
             ctxs_ids = biencoder_input.context_ids
@@ -386,7 +397,11 @@ class BiEncoderTrainer(object):
                 ctx_represenations.extend(ctx_dense.cpu().split(1, dim=0))
 
             batch_positive_idxs = biencoder_input.is_positive
-            positive_idx_per_question.extend([total_ctxs + v for v in batch_positive_idxs])
+            for value in batch_positive_idxs:
+                if isinstance(value, list):
+                    positive_idx_per_question.append([total_ctxs + idx for idx in value])
+                else:
+                    positive_idx_per_question.append(total_ctxs + value)
 
             if (i + 1) % log_result_step == 0:
                 logger.info(
@@ -409,10 +424,12 @@ class BiEncoderTrainer(object):
         values, indices = torch.sort(scores, dim=1, descending=True)
 
         rank = 0
-        for i, idx in enumerate(positive_idx_per_question):
-            # aggregate the rank of the known gold passage in the sorted results for each question
-            gold_idx = (indices[i] == idx).nonzero()
-            rank += gold_idx.item()
+        for i, positive_idxs in enumerate(positive_idx_per_question):
+            if not isinstance(positive_idxs, list):
+                positive_idxs = [positive_idxs]
+            # Multi-label validation uses the rank of the first relevant passage.
+            gold_ranks = [(indices[i] == idx).nonzero().item() for idx in positive_idxs]
+            rank += min(gold_ranks)
 
         if distributed_factor > 1:
             # each node calcuated its own rank, exchange the information between node and calculate the "global" average rank
@@ -474,6 +491,8 @@ class BiEncoderTrainer(object):
                 shuffle=True,
                 shuffle_positives=shuffle_positives,
                 query_token=special_token,
+                multi_positive=getattr(cfg.train, "multi_positive", False),
+                max_positives=getattr(cfg.train, "max_positives_per_query", 0),
             )
 
             # get the token to be used for representation selection
@@ -535,7 +554,8 @@ class BiEncoderTrainer(object):
                 )
                 rolling_train_loss = 0.0
 
-            if data_iteration % eval_step == 0:
+            # The final validation is performed after the loop, so avoid saving it twice.
+            if data_iteration % eval_step == 0 and data_iteration < epoch_batches:
                 logger.info(
                     "rank=%d, Validation: Epoch: %d Step: %d/%d",
                     cfg.local_rank,
@@ -560,7 +580,7 @@ class BiEncoderTrainer(object):
         meta_params = get_encoder_params_state_from_cfg(cfg)
         state = CheckpointState(
             model_to_save.get_state_dict(),
-            self.optimizer.state_dict(),
+            self.optimizer.state_dict() if getattr(cfg.train, "save_optimizer", True) else None,
             scheduler.state_dict(),
             offset,
             epoch,
@@ -568,6 +588,23 @@ class BiEncoderTrainer(object):
         )
         torch.save(state._asdict(), cp)
         logger.info("Saved checkpoint at %s", cp)
+        self.saved_checkpoints.append(cp)
+        keep_last_n = getattr(cfg.train, "keep_last_n", 0)
+        while keep_last_n and len(self.saved_checkpoints) > keep_last_n:
+            removable = next(
+                (
+                    path
+                    for path in self.saved_checkpoints
+                    if path != self.best_cp_name and path != cp
+                ),
+                None,
+            )
+            if not removable:
+                break
+            self.saved_checkpoints.remove(removable)
+            if os.path.isfile(removable):
+                os.remove(removable)
+                logger.info("Removed old checkpoint %s", removable)
         return cp
 
     def _load_saved_state(self, saved_state: CheckpointState):
@@ -608,6 +645,9 @@ def _calc_loss(
     local_ctx_vectors,
     local_positive_idxs,
     local_hard_negatives_idxs: list = None,
+    local_ctx_ids: list = None,
+    local_positive_doc_ids: list = None,
+    multi_positive: bool = False,
     loss_scale: float = None,
 ) -> Tuple[T, bool]:
     """
@@ -625,6 +665,8 @@ def _calc_loss(
                 ctx_vector_to_send,
                 local_positive_idxs,
                 local_hard_negatives_idxs,
+                local_ctx_ids,
+                local_positive_doc_ids,
             ],
             max_size=cfg.global_loss_buf_sz,
         )
@@ -635,22 +677,31 @@ def _calc_loss(
         # ctxs_per_question = local_ctx_vectors.size(0)
         positive_idx_per_question = []
         hard_negatives_per_question = []
+        global_ctx_ids = []
+        global_positive_doc_ids = []
 
         total_ctxs = 0
 
         for i, item in enumerate(global_question_ctx_vectors):
-            q_vector, ctx_vectors, positive_idx, hard_negatives_idxs = item
+            q_vector, ctx_vectors, positive_idx, hard_negatives_idxs, ctx_ids, positive_doc_ids = item
+
+            def offset_positive(value):
+                if isinstance(value, list):
+                    return [idx + total_ctxs for idx in value]
+                return value + total_ctxs
 
             if i != cfg.local_rank:
                 global_q_vector.append(q_vector.to(local_q_vector.device))
                 global_ctxs_vector.append(ctx_vectors.to(local_q_vector.device))
-                positive_idx_per_question.extend([v + total_ctxs for v in positive_idx])
+                positive_idx_per_question.extend([offset_positive(v) for v in positive_idx])
                 hard_negatives_per_question.extend([[v + total_ctxs for v in l] for l in hard_negatives_idxs])
             else:
                 global_q_vector.append(local_q_vector)
                 global_ctxs_vector.append(local_ctx_vectors)
-                positive_idx_per_question.extend([v + total_ctxs for v in local_positive_idxs])
+                positive_idx_per_question.extend([offset_positive(v) for v in local_positive_idxs])
                 hard_negatives_per_question.extend([[v + total_ctxs for v in l] for l in local_hard_negatives_idxs])
+            global_ctx_ids.extend(ctx_ids or [])
+            global_positive_doc_ids.extend(positive_doc_ids or [])
             total_ctxs += ctx_vectors.size(0)
         global_q_vector = torch.cat(global_q_vector, dim=0)
         global_ctxs_vector = torch.cat(global_ctxs_vector, dim=0)
@@ -660,14 +711,26 @@ def _calc_loss(
         global_ctxs_vector = local_ctx_vectors
         positive_idx_per_question = local_positive_idxs
         hard_negatives_per_question = local_hard_negatives_idxs
+        global_ctx_ids = local_ctx_ids
+        global_positive_doc_ids = local_positive_doc_ids
 
-    loss, is_correct = loss_function.calc(
-        global_q_vector,
-        global_ctxs_vector,
-        positive_idx_per_question,
-        hard_negatives_per_question,
-        loss_scale=loss_scale,
-    )
+    if multi_positive:
+        loss, is_correct = loss_function.calc(
+            global_q_vector,
+            global_ctxs_vector,
+            positive_idx_per_question,
+            global_ctx_ids,
+            global_positive_doc_ids,
+            loss_scale=loss_scale,
+        )
+    else:
+        loss, is_correct = loss_function.calc(
+            global_q_vector,
+            global_ctxs_vector,
+            positive_idx_per_question,
+            hard_negatives_per_question,
+            loss_scale=loss_scale,
+        )
 
     return loss, is_correct
 
@@ -724,7 +787,12 @@ def _do_biencoder_fwd_pass(
 
     local_q_vector, local_ctx_vectors = model_out
 
-    loss_function = BiEncoderNllLoss()
+    if input.multi_positive:
+        loss_function = BiEncoderMultiPositiveLoss(
+            temperature=getattr(cfg.train, "loss_temperature", 1.0)
+        )
+    else:
+        loss_function = BiEncoderNllLoss()
 
     loss, is_correct = _calc_loss(
         cfg,
@@ -733,6 +801,9 @@ def _do_biencoder_fwd_pass(
         local_ctx_vectors,
         input.is_positive,
         input.hard_negatives,
+        input.ctx_ids,
+        input.positive_doc_ids,
+        input.multi_positive,
         loss_scale=loss_scale,
     )
     is_correct = is_correct.sum().item()

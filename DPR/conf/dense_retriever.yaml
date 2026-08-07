@@ -28,6 +28,10 @@ match: string
 n_docs: 100
 validation_workers: 16
 
+# TheVault uses document_ids; legacy QA datasets use answer_match.
+validation_mode: answer_match
+metric_cutoffs: [1, 5, 10, 20, 100]
+
 # Batch size to generate query embeddings
 batch_size: 128
 

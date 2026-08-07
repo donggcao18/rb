@@ -1,0 +1,7 @@
+# @package _group_
+
+ruby_code:
+  _target_: dpr.data.retriever_data.CsvCtxSrc
+  file: ${hydra:runtime.cwd}/data/thevault/ruby/corpus.tsv
+  id_prefix:
+
