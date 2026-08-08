@@ -194,8 +194,8 @@ CUDA_VISIBLE_DEVICES=0 python train_dense_encoder.py \
 ```
 
 The A100 profile starts with batch size 64, up to eight positive documents per
-query, ten epochs, and FP32. It retains the current best checkpoint plus the two
-most recent checkpoint files.
+query, ten epochs, and FP32. With `keep_last_n: 2`, it retains at most two
+checkpoint files, normally the best validation checkpoint and the latest one.
 
 Training logs the best checkpoint path. The final checkpoint will normally be:
 
@@ -207,8 +207,13 @@ Set the checkpoint to use for embedding and retrieval. Replace the value with
 the best checkpoint reported by training when appropriate:
 
 ```bash
-THEVAULT_MODEL=outputs/thevault_ruby/dpr_biencoder.9
+export THEVAULT_MODEL=/home/users/congthanh_le/scratch/east/baseline/DPR/outputs/2026-08-08/07-28-22/outputs/thevault_ruby/dpr_biencoder.9
+test -f "$THEVAULT_MODEL" && echo "Checkpoint found: $THEVAULT_MODEL"
 ```
+
+If embedding or retrieval is started from a new shell or a separate batch job,
+export `THEVAULT_BERT_DIR`, `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`, and
+`THEVAULT_MODEL` again in that job.
 
 ## 6. Encode the corpus
 
@@ -251,16 +256,34 @@ Repeat with `shard_id=1`, `2`, and `3`.
 ## 7. Retrieve and evaluate
 
 ```bash
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+if [ -z "${THEVAULT_MODEL:-}" ] || [ ! -f "$THEVAULT_MODEL" ]; then
+  echo "Set THEVAULT_MODEL to an existing DPR checkpoint before retrieval"
+  exit 1
+fi
+
+echo "Using checkpoint: $THEVAULT_MODEL"
+
 CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   datasets=thevault_ruby \
   ctx_sources=thevault \
   qa_dataset=ruby_test \
+  "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
+  model_file="$THEVAULT_MODEL" \
   'ctx_datatsets=[ruby_code]' \
   'encoded_ctx_files=[outputs/thevault_ruby/embeddings/ruby_*]' \
   validation_mode=document_ids \
   n_docs=100 \
   out_file=outputs/thevault_ruby/test_results.json
 ```
+
+Export `THEVAULT_MODEL` in the current shell before running this block. The
+checkpoint must be the same one used to generate the `ruby_*` embeddings. The
+explicit `model_file` override is required: exporting `THEVAULT_MODEL` alone
+does not automatically populate Hydra's `model_file` setting.
 
 `ctx_datatsets` is intentionally misspelled because that is the parameter name
 used by the original DPR repository.
