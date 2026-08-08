@@ -1,15 +1,19 @@
 name: ar2
 
 channels:
-  - conda-forge
+  - pytorch
+  - nvidia
+  - defaults
 
 dependencies:
   - python=3.11
-  - pip
-  - pytorch-gpu
-  - transformers>=4.40
-  - numpy>=1.26
-  - faiss-cpu>=1.8
+  - pytorch=2.5.1
+  - pytorch-cuda=12.1
+  - pip>=23
+  - numpy=1.26
   - pyyaml>=6.0
   - tqdm>=4.66
   - pytest>=8.0
+  - pip:
+      - transformers>=4.40
+      - faiss-cpu>=1.8

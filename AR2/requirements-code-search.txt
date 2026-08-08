@@ -1,5 +1,5 @@
-# Fallback pip dependencies. Prefer environment-code-search.yml for Conda.
-# When using this fallback, install a compatible CUDA PyTorch wheel separately.
+# Pip fallback. Prefer environment-code-search.yml for the Conda environment.
+# This fallback omits PyTorch; install an official CUDA build appropriate for the server.
 transformers>=4.40
 numpy>=1.26
 faiss-cpu>=1.8

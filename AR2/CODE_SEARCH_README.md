@@ -27,10 +27,12 @@ conda env create -f environment-code-search.yml
 conda activate ar2
 ```
 
-It installs the `conda-forge` `pytorch-gpu` build and all code-search
-dependencies. The A100 configuration uses BF16. FAISS CPU is sufficient for a
-corpus of roughly 40,000 Ruby methods; transformer encoding still runs on the
-GPU. See `RUNBOOK_CODE_SEARCH_AR2.md` for the official PyTorch-wheel fallback.
+This creates the complete environment. It installs PyTorch 2.5.1 and CUDA 12.1
+from the official `pytorch` and `nvidia` Conda channels, then installs
+Transformers and CPU FAISS with pip inside that environment. Keeping FAISS out
+of the Conda solve prevents its CPU package from conflicting with the CUDA
+PyTorch stack. The A100 configuration uses BF16; transformer encoding still
+runs on the GPU. See `RUNBOOK_CODE_SEARCH_AR2.md` for the complete sequence.
 
 ## Prepare and audit data
 
