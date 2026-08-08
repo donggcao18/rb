@@ -5,7 +5,6 @@ import logging
 import unicodedata
 
 import jsonlines
-import spacy as spacy
 from typing import List, Dict
 
 
@@ -18,7 +17,7 @@ console = logging.StreamHandler()
 console.setFormatter(log_formatter)
 logger.addHandler(console)
 
-nlp = spacy.load("en_core_web_sm", disable=["parser", "tagger", "ner", "entity_ruler"])
+_nlp = None
 
 
 class Cell:
@@ -269,7 +268,23 @@ def convert_jsonl_to_qas_tsv(path, out):
 
 
 def tokenize(text):
-    doc = nlp(text)
+    # Table tokenization is not used by TheVault. Load spaCy only when a
+    # legacy table workflow explicitly calls this function.
+    global _nlp
+    if _nlp is None:
+        try:
+            import spacy
+        except ImportError as exc:
+            raise ImportError("spaCy is required only for legacy table tokenization") from exc
+        try:
+            _nlp = spacy.load(
+                "en_core_web_sm",
+                disable=["parser", "tagger", "ner", "entity_ruler"],
+            )
+        except OSError:
+            logger.warning("en_core_web_sm is unavailable; using spaCy's blank English tokenizer")
+            _nlp = spacy.blank("en")
+    doc = _nlp(text)
     return [token.text.lower() for token in doc]
 
 

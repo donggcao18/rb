@@ -14,7 +14,6 @@ import copy
 import logging
 
 import regex
-import spacy
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +205,11 @@ class SpacyTokenizer(Tokenizer):
             annotators: set that can include pos, lemma, and ner.
             model: spaCy model to use (either path, or keyword like 'en').
         """
+        try:
+            import spacy
+        except ImportError as exc:
+            raise ImportError("spaCy is required only when SpacyTokenizer is selected") from exc
+
         model = kwargs.get("model", "en_core_web_sm")  # TODO: replace with en ?
         self.annotators = copy.deepcopy(kwargs.get("annotators", set()))
         nlp_kwargs = {"parser": False}
