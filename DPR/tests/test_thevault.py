@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dpr.data.multilabel_metrics import evaluate_multilabel_retrieval
 from dpr.data.thevault_utils import normalize_thevault_query
+from scripts.mine_thevault_hard_negatives import mine_hard_negatives
 from scripts.prepare_thevault import prepare
 
 
@@ -94,6 +95,44 @@ class MultiLabelMetricsTest(unittest.TestCase):
         self.assertTrue(math.isclose(per_query[0]["map@4"], 0.5))
 
 
+class HardNegativeMiningTest(unittest.TestCase):
+    def test_every_multilabel_positive_is_excluded(self):
+        train_records = [
+            {
+                "query_id": "query-1",
+                "question": "parse a file",
+                "positive_ids": ["doc-a", "doc-b"],
+                "positive_ctxs": [
+                    {"id": "doc-a", "text": "positive a", "title": "a"},
+                    {"id": "doc-b", "text": "positive b", "title": "b"},
+                ],
+                "negative_ctxs": [],
+                "hard_negative_ctxs": [],
+            }
+        ]
+        retrieval_records = [
+            {
+                "query_id": "query-1",
+                "ctxs": [
+                    {"id": "doc-a", "text": "positive a", "title": "a", "score": "9"},
+                    {"id": "hard-1", "text": "negative 1", "title": "n1", "score": "8"},
+                    {"id": "doc-b", "text": "positive b", "title": "b", "score": "7"},
+                    {"id": "hard-1", "text": "negative 1", "title": "n1", "score": "6"},
+                    {"id": "hard-2", "text": "negative 2", "title": "n2", "score": "5"},
+                ],
+            }
+        ]
+
+        output, stats = mine_hard_negatives(train_records, retrieval_records, 2)
+
+        self.assertEqual(
+            [ctx["id"] for ctx in output[0]["hard_negative_ctxs"]],
+            ["hard-1", "hard-2"],
+        )
+        self.assertEqual(stats["known_positives_filtered"], 2)
+        self.assertEqual(stats["hard_negatives_selected"], 2)
+
+
 class MultiPositiveLossTest(unittest.TestCase):
     def test_single_positive_matches_legacy_loss(self):
         try:
@@ -132,4 +171,3 @@ class MultiPositiveLossTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

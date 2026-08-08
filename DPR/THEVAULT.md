@@ -176,6 +176,8 @@ multi-positive loss tests require PyTorch and the DPR dependencies.
 
 ## 5. Train DPR
 
+### Version A: multi-positive loss
+
 The initial baseline uses original queries, multi-positive in-batch contrastive
 learning, and no mined hard negatives:
 
@@ -223,7 +225,35 @@ If embedding or retrieval is started from a new shell or a separate batch job,
 export `THEVAULT_DPR_ROOT`, `THEVAULT_BERT_DIR`, `HF_HUB_OFFLINE`,
 `TRANSFORMERS_OFFLINE`, and `THEVAULT_MODEL` again in that job.
 
+### Version B: legacy DPR loss with hard negatives
+
+This alternative keeps the original single-positive `BiEncoderNllLoss`. It
+first trains a legacy-loss baseline, retrieves candidates for every training
+query, removes every ID in the query's complete multi-label `positive_ids`,
+and then trains with one sampled hard negative. Run the checked training
+pipeline and stop after its final checkpoint is selected:
+
+```bash
+export THEVAULT_DPR_ROOT="$(pwd -P)"
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+CUDA_VISIBLE_DEVICES=0 STOP_AFTER_FINAL_TRAIN=1 \
+  bash scripts/run_thevault_legacy_hn.sh
+
+export THEVAULT_MODEL="$(cat "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/best_checkpoint.txt")"
+test -f "$THEVAULT_MODEL" && echo "Checkpoint found: $THEVAULT_MODEL"
+```
+
+Version B uses `train=biencoder_thevault_legacy_hn_a100`, writes the filtered
+pool to `data/thevault/ruby/train_hard_negatives.jsonl`, and stores its final
+checkpoints under `outputs/thevault_ruby_legacy_hn`. The original Version A
+configuration and outputs remain unchanged.
+
 ## 6. Encode the corpus
+
+### Version A: multi-positive checkpoint
 
 For a single embedding shard:
 
@@ -272,7 +302,38 @@ CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
 
 Repeat with `shard_id=1`, `2`, and `3`.
 
+### Version B: legacy-loss hard-negative checkpoint
+
+The final context encoder differs from Version A, so write its embeddings to a
+separate directory:
+
+```bash
+export THEVAULT_DPR_ROOT="$(pwd -P)"
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export THEVAULT_MODEL="$(cat "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/best_checkpoint.txt")"
+
+mkdir -p "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/embeddings"
+
+CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
+  ctx_sources=thevault \
+  ctx_src=ruby_code \
+  "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
+  model_file="$THEVAULT_MODEL" \
+  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/embeddings/ruby" \
+  batch_size=128 \
+  shard_id=0 \
+  num_shards=1 \
+  hydra.job.chdir=False
+```
+
+The Version B embedding file is
+`outputs/thevault_ruby_legacy_hn/embeddings/ruby_0`.
+
 ## 7. Retrieve and evaluate
+
+### Version A: multi-positive checkpoint
 
 ```bash
 export THEVAULT_DPR_ROOT="$(pwd -P)"
@@ -301,6 +362,29 @@ CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   hydra.job.chdir=False
 ```
 
+### Version B: legacy-loss hard-negative checkpoint
+
+```bash
+export THEVAULT_DPR_ROOT="$(pwd -P)"
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export THEVAULT_MODEL="$(cat "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/best_checkpoint.txt")"
+
+CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
+  datasets=thevault_ruby \
+  ctx_sources=thevault \
+  qa_dataset=ruby_test \
+  "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
+  model_file="$THEVAULT_MODEL" \
+  'ctx_datatsets=[ruby_code]' \
+  "encoded_ctx_files=[$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/embeddings/ruby_*]" \
+  validation_mode=document_ids \
+  n_docs=100 \
+  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/test_results.json" \
+  hydra.job.chdir=False
+```
+
 Export `THEVAULT_MODEL` in the current shell before running this block. The
 checkpoint must be the same one used to generate the `ruby_*` embeddings. The
 explicit `model_file` override is required: exporting `THEVAULT_MODEL` alone
@@ -313,8 +397,14 @@ The result file reports Hit, Precision, Recall, MRR, MAP, and nDCG at the
 configured cutoffs. Each unique normalized query is evaluated once against its
 complete set of relevant `text_id` values.
 
-Print the aggregate metrics:
+Print Version A aggregate metrics:
 
 ```bash
 python -c "import json; result=json.load(open('outputs/thevault_ruby/test_results.json')); print(json.dumps(result['aggregate_metrics'], indent=2))"
+```
+
+Print Version B aggregate metrics:
+
+```bash
+python -c "import json; result=json.load(open('outputs/thevault_ruby_legacy_hn/test_results.json')); print(json.dumps(result['aggregate_metrics'], indent=2))"
 ```
