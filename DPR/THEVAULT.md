@@ -4,63 +4,34 @@ This integration trains DPR directly from original `Query:` rows and retrieves
 `Code:` rows. Pseudo-query files are not used. The commands below target a
 Linux server with one NVIDIA A100 and should be run from the `DPR` directory.
 
-## 1. Install the dependencies
+## 1. Create the environment
 
-Use a new environment rather than reusing an environment that contains a
-damaged CUDA library. Python 3.9 is recommended for this legacy DPR codebase:
+Python 3.9 is recommended for this legacy DPR codebase:
 
 ```bash
-conda create -n dpr python=3.9 pip -y
-conda activate dpr
+conda create -n thevault-dpr python=3.9 -y
+conda activate thevault-dpr
 cd /path/to/retrieval-baseline/DPR
-
-python -m pip install --upgrade pip setuptools wheel
 ```
 
-The A100 with NVIDIA driver 580.95.05 can run an older CUDA 11.8 application.
-The CUDA 13.0 value printed by `nvidia-smi` is the maximum version supported by
-the driver; PyTorch does not need to use CUDA 13. Install the official PyTorch
-2.0.1 CUDA 11.8 wheel:
+Install a CUDA-enabled PyTorch build compatible with the server. For a server
+whose NVIDIA driver supports CUDA 11.8:
 
 ```bash
-python -m pip install \
-  torch==2.0.1 \
-  --index-url https://download.pytorch.org/whl/cu118
+conda install pytorch==2.0.1 pytorch-cuda=11.8 \
+  -c pytorch -c nvidia -y
 ```
 
-Verify PyTorch immediately, before installing the other packages:
+Install the remaining dependencies with versions compatible with this DPR
+implementation:
 
 ```bash
-python - <<'PY'
-import torch
-
-print("PyTorch:", torch.__version__)
-print("PyTorch CUDA runtime:", torch.version.cuda)
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-    print("GPU memory (GiB):", torch.cuda.get_device_properties(0).total_memory / 1024**3)
-PY
-```
-
-The expected values are PyTorch `2.0.1+cu118`, CUDA runtime `11.8`, and an
-`NVIDIA A100-SXM4-80GB` GPU. If this import reports `invalid ELF header`, stop:
-the environment or package extraction is corrupted, or the filesystem is out
-of space/quota.
-
-On clusters, installation is commonly performed on a login/head node where no
-GPU is exposed. `CUDA available: False` is expected there. Repeat the PyTorch
-check inside an allocated GPU job; training must also run inside that allocation.
-
-Install the remaining pinned dependencies:
-
-```bash
-python -m pip install \
+pip install \
   "transformers==4.30.2" \
   "hydra-core==1.3.2" \
   "omegaconf==2.3.0" \
   "numpy<2" \
-  "faiss-cpu==1.7.4" \
+  faiss-cpu \
   filelock \
   regex \
   tqdm \
@@ -69,34 +40,83 @@ python -m pip install \
   soundfile \
   editdistance
 
-python -m pip install -e . --no-deps --no-build-isolation
+  "thinc==8.2.5" \
+  "spacy==3.7.5" \
+
+pip install -e . --no-deps
 ```
 
-spaCy and `en_core_web_sm` are not required for the TheVault pipeline. They are
-loaded lazily only by DPR's legacy table and answer-tokenization workflows.
-
-Verify the complete environment:
+Verify that PyTorch can see the A100:
 
 ```bash
-python - <<'PY'
-import faiss
-import hydra
-import jsonlines
-import torch
-import transformers
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+```
 
-print("Environment OK")
-print("PyTorch:", torch.__version__)
-print("Transformers:", transformers.__version__)
-print("CUDA available:", torch.cuda.is_available())
+The supplied training configuration uses FP32, so NVIDIA Apex is not required.
+The legacy `fp16=True` path still requires Apex.
+
+## 2. Download BERT for offline use
+
+This DPR pipeline uses `bert-base-uncased` for both the question encoder and
+the context encoder. It does not use `t5-base`. On a login node or another
+Linux machine that can access Hugging Face, download and save the complete
+model and tokenizer:
+
+```bash
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+mkdir -p "$THEVAULT_BERT_DIR"
+
+python - <<'PY'
+import os
+from transformers import BertModel, BertTokenizer
+
+model_name = "bert-base-uncased"
+output_dir = os.environ["THEVAULT_BERT_DIR"]
+
+tokenizer = BertTokenizer.from_pretrained(model_name)
+model = BertModel.from_pretrained(model_name)
+tokenizer.save_pretrained(output_dir)
+model.save_pretrained(output_dir, safe_serialization=False)
+
+print(f"Saved {model_name} to {output_dir}")
 PY
 ```
 
-Run installation on the login node if compute nodes cannot access PyPI. The
-supplied training configuration uses FP32, so NVIDIA Apex is not required. The
-legacy `fp16=True` path still requires Apex.
+If the cluster has no internet access at all, run the block above on an
+internet-connected machine with a suitable local output path. Copy the saved
+directory to the cluster:
 
-## 2. Prepare the data
+```bash
+rsync -av /local/path/bert-base-uncased/ \
+  USER@CLUSTER:/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased/
+```
+
+Replace `USER@CLUSTER` with your cluster SSH destination. The copied directory
+must include `config.json`, `pytorch_model.bin`, and `vocab.txt`.
+
+Verify that the model can be loaded without network access:
+
+```bash
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+python - <<'PY'
+import os
+from transformers import BertModel, BertTokenizer
+
+model_dir = os.environ["THEVAULT_BERT_DIR"]
+BertTokenizer.from_pretrained(model_dir, local_files_only=True)
+BertModel.from_pretrained(model_dir, local_files_only=True)
+print(f"Offline BERT check passed: {model_dir}")
+PY
+```
+
+Export `THEVAULT_BERT_DIR`, `HF_HUB_OFFLINE`, and `TRANSFORMERS_OFFLINE` in
+every new shell or batch job. Offline mode prevents Hugging Face from retrying
+internet requests when a local file is missing.
+
+## 3. Prepare the data
 
 The complete input files should be available at:
 
@@ -141,7 +161,7 @@ behavior: an identical normalized query receives the union of labels from train
 and test. Use `--test-relevance-scope test` to derive test labels only from test
 rows.
 
-## 3. Run the tests
+## 4. Run the tests
 
 ```bash
 python -m unittest discover \
@@ -153,17 +173,22 @@ python -m unittest discover \
 The data-preparation and metric tests use only the Python standard library. The
 multi-positive loss tests require PyTorch and the DPR dependencies.
 
-## 4. Train DPR
+## 5. Train DPR
 
 The initial baseline uses original queries, multi-positive in-batch contrastive
 learning, and no mined hard negatives:
 
 ```bash
+export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 CUDA_VISIBLE_DEVICES=0 python train_dense_encoder.py \
   datasets=thevault_ruby \
   train=biencoder_thevault_a100 \
   'train_datasets=[ruby_train]' \
   'dev_datasets=[ruby_dev]' \
+  "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
   output_dir=outputs/thevault_ruby \
   fp16=False
 ```
@@ -185,7 +210,7 @@ the best checkpoint reported by training when appropriate:
 THEVAULT_MODEL=outputs/thevault_ruby/dpr_biencoder.9
 ```
 
-## 5. Encode the corpus
+## 6. Encode the corpus
 
 For a single embedding shard:
 
@@ -223,7 +248,7 @@ CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
 
 Repeat with `shard_id=1`, `2`, and `3`.
 
-## 6. Retrieve and evaluate
+## 7. Retrieve and evaluate
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
