@@ -1,0 +1,15 @@
+name: ar2
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch-gpu
+  - transformers>=4.40
+  - numpy>=1.26
+  - faiss-cpu>=1.8
+  - pyyaml>=6.0
+  - tqdm>=4.66
+  - pytest>=8.0

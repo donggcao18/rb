@@ -20,18 +20,25 @@ the older `build_multilable.py` utility.
 
 ## Environment
 
-Use Python 3.10 or newer on the GPU machine. Install a CUDA-compatible PyTorch
-build, then install `requirements-code-search.txt`. The A100 configuration uses
-BF16. FAISS CPU is sufficient for a corpus of roughly 40,000 Ruby methods; the
-transformer encoding still runs on the GPU.
+Use the Conda environment definition on the GPU machine:
+
+```bash
+conda env create -f environment-code-search.yml
+conda activate ar2
+```
+
+It installs the `conda-forge` `pytorch-gpu` build and all code-search
+dependencies. The A100 configuration uses BF16. FAISS CPU is sufficient for a
+corpus of roughly 40,000 Ruby methods; transformer encoding still runs on the
+GPU. See `RUNBOOK_CODE_SEARCH_AR2.md` for the official PyTorch-wheel fallback.
 
 ## Prepare and audit data
 
-Run commands from `AR2/AR2`:
+Run commands from `AR2`:
 
 ```bash
 python -m code_search.prepare_data \
-  --train ../../theVault-multilabel/Ruby_train_r32.0.json \
+  --train ../theVault-multilabel/Ruby_train_r32.0.json \
   --test /path/to/Ruby_test_r32.0.json \
   --output-dir outputs/vault-ruby/data
 ```

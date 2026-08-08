@@ -1,7 +1,0 @@
-# Install a CUDA-compatible PyTorch build separately for the target A100 environment.
-transformers>=4.40
-numpy>=1.26
-faiss-cpu>=1.8
-PyYAML>=6.0
-tqdm>=4.66
-pytest>=8.0

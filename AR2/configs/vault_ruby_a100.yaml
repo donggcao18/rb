@@ -1,6 +1,6 @@
 data:
-  raw_train: ../../theVault-multilabel/Ruby_train_r32.0.json
-  raw_test: ../../theVault-multilabel/Ruby_test_r32.0.json
+  raw_train: ../theVault-multilabel/Ruby_train_r32.0.json
+  raw_test: ../theVault-multilabel/Ruby_test_r32.0.json
   prepared_dir: outputs/vault-ruby/data
   dev_fraction: 0.1
   global_qrels: false
