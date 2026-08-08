@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from setuptools import setup
+from setuptools import find_packages, setup
 
 with open("README.md") as f:
     readme = f.read()
@@ -23,6 +23,9 @@ setup(
     ],
     long_description=readme,
     long_description_content_type="text/markdown",
+    # Explicit discovery prevents modern setuptools from treating generated
+    # top-level directories such as conf/ and data/ as Python packages.
+    packages=find_packages(include=["dpr", "dpr.*"]),
     setup_requires=[
         "setuptools>=18.0",
     ],
