@@ -72,9 +72,11 @@ def generate_question_vectors(
             else:
                 batch_tensors = [tensorizer.text_to_tensor(q) for q in batch_questions]
 
-            # TODO: this only works for Wav2vec pipeline but will crash the regular text pipeline
-            max_vector_len = max(q_t.size(1) for q_t in batch_tensors)
-            min_vector_len = min(q_t.size(1) for q_t in batch_tensors)
+            # Text tensorizers return [sequence_length], while Wav2Vec-style
+            # tensorizers may return [1, sequence_length]. In both cases the
+            # sequence length is the final tensor dimension.
+            max_vector_len = max(q_t.size(-1) for q_t in batch_tensors)
+            min_vector_len = min(q_t.size(-1) for q_t in batch_tensors)
 
             if max_vector_len != min_vector_len:
                 # TODO: _pad_to_len move to utils
