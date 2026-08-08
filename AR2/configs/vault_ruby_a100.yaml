@@ -1,14 +1,14 @@
 data:
-  raw_train: ../theVault-multilabel/Ruby_train_r32.0.json
-  raw_test: ../theVault-multilabel/Ruby_test_r32.0.json
-  prepared_dir: outputs/vault-ruby/data
+  raw_train: /home/users/congthanh_le/scratch/east/CodeGR/data/original_indexed_data_RQ_8_16_decoder_start/Ruby_train_r32.0.json
+  raw_test: /home/users/congthanh_le/scratch/east/CodeGR/data/original_indexed_data_RQ_8_16_decoder_start/Ruby_test_r32.0.json
+  prepared_dir: ./outputs/vault-ruby/data
   dev_fraction: 0.1
   global_qrels: false
   allow_missing_documents: false
   initial_hard_negatives: null
 
 output:
-  dir: outputs/vault-ruby/checkpoints
+  dir: ./outputs/vault-ruby/checkpoints
 
 runtime:
   seed: 13
@@ -17,7 +17,7 @@ runtime:
   log_every: 50
 
 retriever:
-  model_name: microsoft/codebert-base
+  model_name: google-bert/bert-base-uncased
   share_weights: false
   pooling: cls
   normalize_embeddings: false
@@ -36,7 +36,7 @@ retriever:
   max_grad_norm: 1.0
 
 ranker:
-  model_name: microsoft/codebert-base
+  model_name: google-bert/bert-base-uncased
   max_length: 384
   per_device_batch_size: 8
   gradient_accumulation: 4

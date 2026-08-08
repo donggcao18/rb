@@ -185,7 +185,15 @@ export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/b
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-
+CUDA_VISIBLE_DEVICES=0 python train_dense_encoder.py \
+  datasets=thevault_ruby \
+  train=biencoder_thevault_a100 \
+  'train_datasets=[ruby_train]' \
+  'dev_datasets=[ruby_dev]' \
+  "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
+  "output_dir=$THEVAULT_DPR_ROOT/outputs/thevault_ruby" \
+  fp16=False \
+  hydra.job.chdir=False
 ```
 
 `hydra.job.chdir=False` prevents Hydra from changing into an
