@@ -4,14 +4,6 @@ ruby_train:
   _target_: dpr.data.thevault_data.TheVaultMultiLabelDataset
   file: ${hydra:runtime.cwd}/data/thevault/ruby/train.jsonl
 
-ruby_train_hn:
-  _target_: dpr.data.thevault_data.TheVaultMultiLabelDataset
-  file: ${hydra:runtime.cwd}/data/thevault/ruby/train_hard_negatives.jsonl
-
-ruby_train_for_mining:
-  _target_: dpr.data.thevault_data.TheVaultMultiLabelQASrc
-  file: ${hydra:runtime.cwd}/data/thevault/ruby/train.jsonl
-
 ruby_dev:
   _target_: dpr.data.thevault_data.TheVaultMultiLabelDataset
   file: ${hydra:runtime.cwd}/data/thevault/ruby/dev.jsonl

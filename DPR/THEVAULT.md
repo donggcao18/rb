@@ -225,13 +225,14 @@ If embedding or retrieval is started from a new shell or a separate batch job,
 export `THEVAULT_DPR_ROOT`, `THEVAULT_BERT_DIR`, `HF_HUB_OFFLINE`,
 `TRANSFORMERS_OFFLINE`, and `THEVAULT_MODEL` again in that job.
 
-### Version B: legacy DPR loss with hard negatives
+### Version B: legacy DPR loss with gold in-batch negatives
 
-This alternative keeps the original single-positive `BiEncoderNllLoss`. It
-first trains a legacy-loss baseline, retrieves candidates for every training
-query, removes every ID in the query's complete multi-label `positive_ids`,
-and then trains with one sampled hard negative. Run the checked training
-pipeline and stop after its final checkpoint is selected:
+This alternative keeps the original single-positive `BiEncoderNllLoss`. For
+each query, the selected gold document is the target and gold documents paired
+with other questions in the same mini-batch act as negatives. Before computing
+the softmax, the code masks any in-batch document whose ID occurs in that
+query's complete multi-label `positive_ids`, preventing a known positive from
+being trained as a negative:
 
 ```bash
 export THEVAULT_DPR_ROOT="$(pwd -P)"
@@ -239,17 +240,24 @@ export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/b
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-CUDA_VISIBLE_DEVICES=0 STOP_AFTER_FINAL_TRAIN=1 \
-  bash scripts/run_thevault_legacy_hn.sh
+CUDA_VISIBLE_DEVICES=0 python train_dense_encoder.py \
+  datasets=thevault_ruby \
+  train=biencoder_thevault_legacy_inbatch_a100 \
+  'train_datasets=[ruby_train]' \
+  'dev_datasets=[ruby_dev]' \
+  "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
+  "output_dir=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch" \
+  fp16=False \
+  hydra.job.chdir=False
 
-export THEVAULT_MODEL="$(cat "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/best_checkpoint.txt")"
+export THEVAULT_MODEL="$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/dpr_biencoder.9"
 test -f "$THEVAULT_MODEL" && echo "Checkpoint found: $THEVAULT_MODEL"
 ```
 
-Version B uses `train=biencoder_thevault_legacy_hn_a100`, writes the filtered
-pool to `data/thevault/ruby/train_hard_negatives.jsonl`, and stores its final
-checkpoints under `outputs/thevault_ruby_legacy_hn`. The original Version A
-configuration and outputs remain unchanged.
+Replace `.9` with the best checkpoint reported by training when appropriate.
+Version B uses no separate mining pass and no `train_hard_negatives.jsonl`.
+Its configuration sets `hard_negatives: 0`, `multi_positive: false`, and
+`mask_multilabel_false_negatives: true`. Version A remains unchanged.
 
 ## 6. Encode the corpus
 
@@ -302,7 +310,7 @@ CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
 
 Repeat with `shard_id=1`, `2`, and `3`.
 
-### Version B: legacy-loss hard-negative checkpoint
+### Version B: legacy-loss gold in-batch checkpoint
 
 The final context encoder differs from Version A, so write its embeddings to a
 separate directory:
@@ -312,16 +320,16 @@ export THEVAULT_DPR_ROOT="$(pwd -P)"
 export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
-export THEVAULT_MODEL="$(cat "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/best_checkpoint.txt")"
+export THEVAULT_MODEL="$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/dpr_biencoder.9"
 
-mkdir -p "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/embeddings"
+mkdir -p "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/embeddings"
 
 CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
   ctx_sources=thevault \
   ctx_src=ruby_code \
   "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
   model_file="$THEVAULT_MODEL" \
-  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/embeddings/ruby" \
+  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/embeddings/ruby" \
   batch_size=128 \
   shard_id=0 \
   num_shards=1 \
@@ -329,7 +337,7 @@ CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
 ```
 
 The Version B embedding file is
-`outputs/thevault_ruby_legacy_hn/embeddings/ruby_0`.
+`outputs/thevault_ruby_legacy_inbatch/embeddings/ruby_0`.
 
 ## 7. Retrieve and evaluate
 
@@ -362,14 +370,14 @@ CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   hydra.job.chdir=False
 ```
 
-### Version B: legacy-loss hard-negative checkpoint
+### Version B: legacy-loss gold in-batch checkpoint
 
 ```bash
 export THEVAULT_DPR_ROOT="$(pwd -P)"
 export THEVAULT_BERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/bert-base-uncased
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
-export THEVAULT_MODEL="$(cat "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/best_checkpoint.txt")"
+export THEVAULT_MODEL="$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/dpr_biencoder.9"
 
 CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   datasets=thevault_ruby \
@@ -378,10 +386,10 @@ CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   "encoder.pretrained_model_cfg=$THEVAULT_BERT_DIR" \
   model_file="$THEVAULT_MODEL" \
   'ctx_datatsets=[ruby_code]' \
-  "encoded_ctx_files=[$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/embeddings/ruby_*]" \
+  "encoded_ctx_files=[$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/embeddings/ruby_*]" \
   validation_mode=document_ids \
   n_docs=100 \
-  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_hn/test_results.json" \
+  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/test_results.json" \
   hydra.job.chdir=False
 ```
 
@@ -406,5 +414,5 @@ python -c "import json; result=json.load(open('outputs/thevault_ruby/test_result
 Print Version B aggregate metrics:
 
 ```bash
-python -c "import json; result=json.load(open('outputs/thevault_ruby_legacy_hn/test_results.json')); print(json.dumps(result['aggregate_metrics'], indent=2))"
+python -c "import json; result=json.load(open('outputs/thevault_ruby_legacy_inbatch/test_results.json')); print(json.dumps(result['aggregate_metrics'], indent=2))"
 ```

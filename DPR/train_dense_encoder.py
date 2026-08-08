@@ -730,6 +730,8 @@ def _calc_loss(
             positive_idx_per_question,
             hard_negatives_per_question,
             loss_scale=loss_scale,
+            ctx_ids=global_ctx_ids,
+            positive_doc_ids=global_positive_doc_ids,
         )
 
     return loss, is_correct
@@ -792,7 +794,9 @@ def _do_biencoder_fwd_pass(
             temperature=getattr(cfg.train, "loss_temperature", 1.0)
         )
     else:
-        loss_function = BiEncoderNllLoss()
+        loss_function = BiEncoderNllLoss(
+            mask_false_negatives=getattr(cfg.train, "mask_multilabel_false_negatives", False)
+        )
 
     loss, is_correct = _calc_loss(
         cfg,

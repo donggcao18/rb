@@ -1,6 +1,8 @@
 # @package _group_
 
-# Legacy DPR single-positive NLL with one sampled mined hard negative.
+# Legacy DPR single-positive NLL with gold passages from other questions used
+# as in-batch negatives. Known multi-label positives are masked from the
+# negative softmax denominator.
 batch_size: 64
 dev_batch_size: 128
 adam_eps: 1e-8
@@ -15,9 +17,10 @@ gradient_accumulation_steps: 1
 keep_partial_batches: true
 num_train_epochs: 10
 eval_per_epoch: 1
-hard_negatives: 1
+hard_negatives: 0
 other_negatives: 0
 multi_positive: false
+mask_multilabel_false_negatives: true
 save_optimizer: true
 keep_last_n: 2
 val_av_rank_hard_neg: 0

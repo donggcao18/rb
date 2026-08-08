@@ -281,6 +281,9 @@ class BiEncoder(nn.Module):
 
 
 class BiEncoderNllLoss(object):
+    def __init__(self, mask_false_negatives: bool = False):
+        self.mask_false_negatives = mask_false_negatives
+
     def calc(
         self,
         q_vectors: T,
@@ -288,6 +291,8 @@ class BiEncoderNllLoss(object):
         positive_idx_per_question: list,
         hard_negative_idx_per_question: list = None,
         loss_scale: float = None,
+        ctx_ids: List[str] = None,
+        positive_doc_ids: List[List[str]] = None,
     ) -> Tuple[T, int]:
         """
         Computes nll loss for the given lists of question and ctx vectors.
@@ -300,6 +305,35 @@ class BiEncoderNllLoss(object):
         if len(q_vectors.size()) > 1:
             q_num = q_vectors.size(0)
             scores = scores.view(q_num, -1)
+
+        if self.mask_false_negatives:
+            if ctx_ids is None or positive_doc_ids is None:
+                raise ValueError(
+                    "ctx_ids and positive_doc_ids are required when masking false negatives"
+                )
+            if len(ctx_ids) != scores.size(1):
+                raise ValueError(
+                    "Context ID count {} does not match score columns {}".format(
+                        len(ctx_ids), scores.size(1)
+                    )
+                )
+            if len(positive_doc_ids) != scores.size(0):
+                raise ValueError(
+                    "Positive-ID row count {} does not match query rows {}".format(
+                        len(positive_doc_ids), scores.size(0)
+                    )
+                )
+
+            false_negative_mask = torch.zeros_like(scores, dtype=torch.bool)
+            for query_idx, selected_positive_idx in enumerate(positive_idx_per_question):
+                relevant_ids = {str(value) for value in positive_doc_ids[query_idx]}
+                for context_idx, context_id in enumerate(ctx_ids):
+                    if context_idx != selected_positive_idx and str(context_id) in relevant_ids:
+                        false_negative_mask[query_idx, context_idx] = True
+
+            # Keep the single legacy target, but remove every other known
+            # relevant document from the softmax denominator.
+            scores = scores.masked_fill(false_negative_mask, torch.finfo(scores.dtype).min)
 
         softmax_scores = F.log_softmax(scores, dim=1)
 

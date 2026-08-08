@@ -6,7 +6,6 @@ from pathlib import Path
 
 from dpr.data.multilabel_metrics import evaluate_multilabel_retrieval
 from dpr.data.thevault_utils import normalize_thevault_query
-from scripts.mine_thevault_hard_negatives import mine_hard_negatives
 from scripts.prepare_thevault import prepare
 
 
@@ -95,45 +94,7 @@ class MultiLabelMetricsTest(unittest.TestCase):
         self.assertTrue(math.isclose(per_query[0]["map@4"], 0.5))
 
 
-class HardNegativeMiningTest(unittest.TestCase):
-    def test_every_multilabel_positive_is_excluded(self):
-        train_records = [
-            {
-                "query_id": "query-1",
-                "question": "parse a file",
-                "positive_ids": ["doc-a", "doc-b"],
-                "positive_ctxs": [
-                    {"id": "doc-a", "text": "positive a", "title": "a"},
-                    {"id": "doc-b", "text": "positive b", "title": "b"},
-                ],
-                "negative_ctxs": [],
-                "hard_negative_ctxs": [],
-            }
-        ]
-        retrieval_records = [
-            {
-                "query_id": "query-1",
-                "ctxs": [
-                    {"id": "doc-a", "text": "positive a", "title": "a", "score": "9"},
-                    {"id": "hard-1", "text": "negative 1", "title": "n1", "score": "8"},
-                    {"id": "doc-b", "text": "positive b", "title": "b", "score": "7"},
-                    {"id": "hard-1", "text": "negative 1", "title": "n1", "score": "6"},
-                    {"id": "hard-2", "text": "negative 2", "title": "n2", "score": "5"},
-                ],
-            }
-        ]
-
-        output, stats = mine_hard_negatives(train_records, retrieval_records, 2)
-
-        self.assertEqual(
-            [ctx["id"] for ctx in output[0]["hard_negative_ctxs"]],
-            ["hard-1", "hard-2"],
-        )
-        self.assertEqual(stats["known_positives_filtered"], 2)
-        self.assertEqual(stats["hard_negatives_selected"], 2)
-
-
-class MultiPositiveLossTest(unittest.TestCase):
+class BiEncoderLossTest(unittest.TestCase):
     def test_single_positive_matches_legacy_loss(self):
         try:
             import torch
@@ -167,6 +128,39 @@ class MultiPositiveLossTest(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(loss))
         self.assertEqual(correct.item(), 1)
+
+    def test_legacy_loss_masks_other_multilabel_positives(self):
+        try:
+            import torch
+            from dpr.models.biencoder import BiEncoderNllLoss
+        except ImportError:
+            self.skipTest("PyTorch DPR dependencies are not installed")
+
+        questions = torch.tensor([[1.0, 0.0]])
+        contexts = torch.tensor([[1.0, 0.0], [4.0, 0.0], [0.5, 0.0]])
+        context_ids = ["doc-a", "doc-b", "wrong"]
+        positive_ids = [["doc-a", "doc-b"]]
+
+        unmasked_loss, unmasked_correct = BiEncoderNllLoss().calc(
+            questions,
+            contexts,
+            [0],
+            [[]],
+            ctx_ids=context_ids,
+            positive_doc_ids=positive_ids,
+        )
+        masked_loss, masked_correct = BiEncoderNllLoss(mask_false_negatives=True).calc(
+            questions,
+            contexts,
+            [0],
+            [[]],
+            ctx_ids=context_ids,
+            positive_doc_ids=positive_ids,
+        )
+
+        self.assertEqual(unmasked_correct.item(), 0)
+        self.assertEqual(masked_correct.item(), 1)
+        self.assertLess(masked_loss.item(), unmasked_loss.item())
 
 
 if __name__ == "__main__":
