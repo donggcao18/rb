@@ -19,12 +19,13 @@ from torch import nn
 
 
 if transformers.__version__.startswith("4"):
-    from transformers import BertConfig, BertModel
+    from transformers import BertConfig, BertModel, RobertaConfig, RobertaModel
     from transformers import AdamW
     from transformers import BertTokenizer
     from transformers import RobertaTokenizer
 else:
     from transformers.modeling_bert import BertConfig, BertModel
+    from transformers.modeling_roberta import RobertaConfig, RobertaModel
     from transformers.optimization import AdamW
     from transformers.tokenization_bert import BertTokenizer
     from transformers.tokenization_roberta import RobertaTokenizer
@@ -68,6 +69,46 @@ def get_bert_biencoder_components(cfg, inference_only: bool = False, **kwargs):
     )
 
     tensorizer = get_bert_tensorizer(cfg)
+    return tensorizer, biencoder, optimizer
+
+
+def get_roberta_biencoder_components(cfg, inference_only: bool = False, **kwargs):
+    """Build an HF RoBERTa bi-encoder, including CodeBERT checkpoints."""
+    dropout = cfg.encoder.dropout if hasattr(cfg.encoder, "dropout") else 0.0
+    question_encoder = HFRobertaEncoder.init_encoder(
+        cfg.encoder.pretrained_model_cfg,
+        projection_dim=cfg.encoder.projection_dim,
+        dropout=dropout,
+        pretrained=cfg.encoder.pretrained,
+        **kwargs
+    )
+    ctx_encoder = HFRobertaEncoder.init_encoder(
+        cfg.encoder.pretrained_model_cfg,
+        projection_dim=cfg.encoder.projection_dim,
+        dropout=dropout,
+        pretrained=cfg.encoder.pretrained,
+        **kwargs
+    )
+
+    fix_ctx_encoder = cfg.encoder.fix_ctx_encoder if hasattr(cfg.encoder, "fix_ctx_encoder") else False
+    biencoder = BiEncoder(question_encoder, ctx_encoder, fix_ctx_encoder=fix_ctx_encoder)
+
+    optimizer = (
+        get_optimizer(
+            biencoder,
+            learning_rate=cfg.train.learning_rate,
+            adam_eps=cfg.train.adam_eps,
+            weight_decay=cfg.train.weight_decay,
+        )
+        if not inference_only
+        else None
+    )
+
+    tensorizer = get_roberta_tensorizer(
+        cfg.encoder.pretrained_model_cfg,
+        cfg.do_lower_case,
+        cfg.encoder.sequence_length,
+    )
     return tensorizer, biencoder, optimizer
 
 
@@ -266,6 +307,72 @@ class HFBertEncoder(BertModel):
         return sequence_output, pooled_output, hidden_states
 
     # TODO: make a super class for all encoders
+    def get_out_size(self):
+        if self.encode_proj:
+            return self.encode_proj.out_features
+        return self.config.hidden_size
+
+
+class HFRobertaEncoder(RobertaModel):
+    """RoBERTa encoder with the interface expected by DPR's BiEncoder."""
+
+    def __init__(self, config, project_dim: int = 0):
+        RobertaModel.__init__(self, config)
+        assert config.hidden_size > 0, "Encoder hidden_size can't be zero"
+        self.encode_proj = nn.Linear(config.hidden_size, project_dim) if project_dim != 0 else None
+        self.init_weights()
+
+    @classmethod
+    def init_encoder(
+        cls, cfg_name: str, projection_dim: int = 0, dropout: float = 0.1, pretrained: bool = True, **kwargs
+    ) -> RobertaModel:
+        logger.info("Initializing HF RoBERTa Encoder. cfg_name=%s", cfg_name)
+        cfg = RobertaConfig.from_pretrained(cfg_name if cfg_name else "roberta-base")
+        if dropout != 0:
+            cfg.attention_probs_dropout_prob = dropout
+            cfg.hidden_dropout_prob = dropout
+
+        if pretrained:
+            return cls.from_pretrained(cfg_name, config=cfg, project_dim=projection_dim, **kwargs)
+        return cls(cfg, project_dim=projection_dim)
+
+    def forward(
+        self,
+        input_ids: T,
+        token_type_ids: T,
+        attention_mask: T,
+        representation_token_pos=0,
+    ) -> Tuple[T, ...]:
+        # RoBERTa/CodeBERT does not use BERT segment IDs. DPR still supplies an
+        # all-zero tensor, so deliberately omit it from the HF model call.
+        out = super().forward(input_ids=input_ids, attention_mask=attention_mask)
+
+        if hasattr(out, "last_hidden_state"):
+            sequence_output = out.last_hidden_state
+            hidden_states = out.hidden_states
+        else:
+            sequence_output = out[0]
+            hidden_states = out[2] if self.config.output_hidden_states and len(out) > 2 else None
+
+        # Use the contextualized <s> token, not RoBERTa's classification
+        # pooler. This matches DPR's BERT representation contract.
+        if isinstance(representation_token_pos, int):
+            pooled_output = sequence_output[:, representation_token_pos, :]
+        else:
+            bsz = sequence_output.size(0)
+            assert representation_token_pos.size(0) == bsz, (
+                "query bsz={} while representation_token_pos bsz={}".format(
+                    bsz, representation_token_pos.size(0)
+                )
+            )
+            pooled_output = torch.stack(
+                [sequence_output[i, representation_token_pos[i, 1], :] for i in range(bsz)]
+            )
+
+        if self.encode_proj:
+            pooled_output = self.encode_proj(pooled_output)
+        return sequence_output, pooled_output, hidden_states
+
     def get_out_size(self):
         if self.encode_proj:
             return self.encode_proj.out_features

@@ -163,5 +163,40 @@ class BiEncoderLossTest(unittest.TestCase):
         self.assertLess(masked_loss.item(), unmasked_loss.item())
 
 
+class HFRobertaEncoderTest(unittest.TestCase):
+    def test_codebert_adapter_uses_first_token_representation(self):
+        try:
+            import torch
+            from transformers import RobertaConfig
+
+            from dpr.models.hf_models import HFRobertaEncoder
+        except (ImportError, OSError):
+            self.skipTest("PyTorch and Transformers are not installed")
+
+        config = RobertaConfig(
+            vocab_size=32,
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=32,
+            max_position_embeddings=32,
+            pad_token_id=1,
+        )
+        encoder = HFRobertaEncoder(config)
+        encoder.eval()
+
+        input_ids = torch.tensor([[0, 7, 8, 2, 1], [0, 9, 2, 1, 1]])
+        segment_ids = torch.zeros_like(input_ids)
+        attention_mask = input_ids.ne(config.pad_token_id)
+
+        with torch.no_grad():
+            sequence, pooled, _ = encoder(input_ids, segment_ids, attention_mask)
+
+        self.assertEqual(tuple(sequence.shape), (2, 5, 16))
+        self.assertEqual(tuple(pooled.shape), (2, 16))
+        self.assertTrue(torch.allclose(pooled, sequence[:, 0, :]))
+        self.assertEqual(encoder.get_out_size(), 16)
+
+
 if __name__ == "__main__":
     unittest.main()

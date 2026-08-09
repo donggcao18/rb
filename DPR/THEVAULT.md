@@ -38,12 +38,11 @@ pip install \
   wget \
   jsonlines \
   soundfile \
-  editdistance
-
+  editdistance \
   "thinc==8.2.5" \
-  "spacy==3.7.5" \
+  "spacy==3.7.5"
 
-pip install -e . --no-deps
+python -m pip install -e . --no-deps --no-build-isolation
 ```
 
 Verify that PyTorch can see the A100:
@@ -55,7 +54,9 @@ python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', to
 The supplied training configuration uses FP32, so NVIDIA Apex is not required.
 The legacy `fp16=True` path still requires Apex.
 
-## 2. Download BERT for offline use
+## 2. Download encoder models for offline use
+
+### BERT
 
 This DPR pipeline uses `bert-base-uncased` for both the question encoder and
 the context encoder. It does not use `t5-base`. On a login node or another
@@ -117,6 +118,63 @@ Export `THEVAULT_BERT_DIR`, `HF_HUB_OFFLINE`, and `TRANSFORMERS_OFFLINE` in
 every new shell or batch job. Offline mode prevents Hugging Face from retrying
 internet requests when a local file is missing.
 
+### CodeBERT
+
+CodeBERT uses the Hugging Face RoBERTa architecture and tokenizer, not BERT's
+WordPiece tokenizer. Download `microsoft/codebert-base` on a machine with
+internet access:
+
+```bash
+export THEVAULT_CODEBERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/codebert-base
+mkdir -p "$THEVAULT_CODEBERT_DIR"
+
+python - <<'PY'
+import os
+from transformers import RobertaModel, RobertaTokenizer
+
+model_name = "microsoft/codebert-base"
+output_dir = os.environ["THEVAULT_CODEBERT_DIR"]
+
+tokenizer = RobertaTokenizer.from_pretrained(model_name)
+model = RobertaModel.from_pretrained(model_name)
+tokenizer.save_pretrained(output_dir)
+model.save_pretrained(output_dir, safe_serialization=False)
+
+print(f"Saved {model_name} to {output_dir}")
+PY
+```
+
+If the GPU cluster cannot access Hugging Face, copy the complete directory from
+the internet-connected machine:
+
+```bash
+rsync -av /local/path/codebert-base/ \
+  USER@CLUSTER:/mnt/beegfs/scratch/congthanh_le/east/baseline/models/codebert-base/
+```
+
+The directory must include `config.json`, `pytorch_model.bin`, `vocab.json`,
+and `merges.txt`. Verify the local copy without network access:
+
+```bash
+export THEVAULT_CODEBERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/codebert-base
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+python - <<'PY'
+import os
+from transformers import RobertaModel, RobertaTokenizer
+
+model_dir = os.environ["THEVAULT_CODEBERT_DIR"]
+RobertaTokenizer.from_pretrained(model_dir, local_files_only=True)
+RobertaModel.from_pretrained(model_dir, local_files_only=True)
+print(f"Offline CodeBERT check passed: {model_dir}")
+PY
+```
+
+CodeBERT needs no additional dependency beyond the pinned PyTorch and
+Transformers versions from Section 1. Do not point `encoder=hf_bert` at this
+directory; use the `encoder=hf_codebert` profile shown below.
+
 ## 3. Prepare the data
 
 The complete input files should be available at:
@@ -176,7 +234,7 @@ multi-positive loss tests require PyTorch and the DPR dependencies.
 
 ## 5. Train DPR
 
-### Version A: multi-positive loss
+### Version A: BERT with multi-positive loss
 
 The initial baseline uses original queries, multi-positive in-batch contrastive
 learning, and no mined hard negatives:
@@ -225,7 +283,7 @@ If embedding or retrieval is started from a new shell or a separate batch job,
 export `THEVAULT_DPR_ROOT`, `THEVAULT_BERT_DIR`, `HF_HUB_OFFLINE`,
 `TRANSFORMERS_OFFLINE`, and `THEVAULT_MODEL` again in that job.
 
-### Version B: legacy DPR loss with gold in-batch negatives
+### Version B: BERT with legacy DPR loss and gold in-batch negatives
 
 This alternative keeps the original single-positive `BiEncoderNllLoss`. For
 each query, the selected gold document is the target and gold documents paired
@@ -259,9 +317,54 @@ Version B uses no separate mining pass and no `train_hard_negatives.jsonl`.
 Its configuration sets `hard_negatives: 0`, `multi_positive: false`, and
 `mask_multilabel_false_negatives: true`. Version A remains unchanged.
 
+### Version C: CodeBERT with legacy DPR loss and gold in-batch negatives
+
+This is the recommended first CodeBERT comparison. It uses the same Version B
+loss and multi-label false-negative mask, while initializing both independent
+encoders from `microsoft/codebert-base`. CodeBERT uses `<s>` as its vector
+position and does not lowercase the query or code:
+
+```bash
+export THEVAULT_DPR_ROOT="$(pwd -P)"
+export THEVAULT_CODEBERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/codebert-base
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+CUDA_VISIBLE_DEVICES=0 python train_dense_encoder.py \
+  datasets=thevault_ruby \
+  encoder=hf_codebert \
+  train=biencoder_thevault_legacy_inbatch_a100 \
+  'train_datasets=[ruby_train]' \
+  'dev_datasets=[ruby_dev]' \
+  "encoder.pretrained_model_cfg=$THEVAULT_CODEBERT_DIR" \
+  "output_dir=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch" \
+  do_lower_case=False \
+  fp16=False \
+  hydra.job.chdir=False
+
+export THEVAULT_MODEL="$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/dpr_biencoder.9"
+test -f "$THEVAULT_MODEL" && echo "Checkpoint found: $THEVAULT_MODEL"
+```
+
+Replace `.9` with the best checkpoint path printed by training. If batch size
+64 does not fit, append `train.batch_size=32 train.dev_batch_size=64`; the loss
+and negative masking do not change.
+
+To compare CodeBERT with Version A's multi-positive loss, change only these
+overrides and keep the remaining CodeBERT command unchanged:
+
+```bash
+train=biencoder_thevault_a100
+"output_dir=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_multi_positive"
+```
+
+BERT and CodeBERT checkpoints are not interchangeable. A CodeBERT checkpoint
+contains both the trained CodeBERT query encoder and context encoder in the
+same `dpr_biencoder.N` file.
+
 ## 6. Encode the corpus
 
-### Version A: multi-positive checkpoint
+### Version A: BERT multi-positive checkpoint
 
 For a single embedding shard:
 
@@ -310,7 +413,7 @@ CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
 
 Repeat with `shard_id=1`, `2`, and `3`.
 
-### Version B: legacy-loss gold in-batch checkpoint
+### Version B: BERT legacy-loss gold in-batch checkpoint
 
 The final context encoder differs from Version A, so write its embeddings to a
 separate directory:
@@ -339,9 +442,42 @@ CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
 The Version B embedding file is
 `outputs/thevault_ruby_legacy_inbatch/embeddings/ruby_0`.
 
+### Version C: CodeBERT legacy-loss checkpoint
+
+CodeBERT has a separately trained context encoder, so it requires a fresh
+corpus embedding file. Do not reuse either BERT embedding directory:
+
+```bash
+export THEVAULT_DPR_ROOT="$(pwd -P)"
+export THEVAULT_CODEBERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/codebert-base
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export THEVAULT_MODEL="$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/dpr_biencoder.9"
+
+mkdir -p "$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/embeddings"
+
+CUDA_VISIBLE_DEVICES=0 python generate_dense_embeddings.py \
+  encoder=hf_codebert \
+  ctx_sources=thevault \
+  ctx_src=ruby_code \
+  "encoder.pretrained_model_cfg=$THEVAULT_CODEBERT_DIR" \
+  model_file="$THEVAULT_MODEL" \
+  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/embeddings/ruby" \
+  do_lower_case=False \
+  batch_size=128 \
+  shard_id=0 \
+  num_shards=1 \
+  hydra.job.chdir=False
+```
+
+The resulting file is
+`outputs/thevault_ruby_codebert_legacy_inbatch/embeddings/ruby_0`. If you used
+the CodeBERT multi-positive output instead, change both `THEVAULT_MODEL` and
+the embedding output directory to `thevault_ruby_codebert_multi_positive`.
+
 ## 7. Retrieve and evaluate
 
-### Version A: multi-positive checkpoint
+### Version A: BERT multi-positive checkpoint
 
 ```bash
 export THEVAULT_DPR_ROOT="$(pwd -P)"
@@ -370,7 +506,7 @@ CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   hydra.job.chdir=False
 ```
 
-### Version B: legacy-loss gold in-batch checkpoint
+### Version B: BERT legacy-loss gold in-batch checkpoint
 
 ```bash
 export THEVAULT_DPR_ROOT="$(pwd -P)"
@@ -390,6 +526,34 @@ CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
   validation_mode=document_ids \
   n_docs=100 \
   "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_legacy_inbatch/test_results.json" \
+  hydra.job.chdir=False
+```
+
+### Version C: CodeBERT legacy-loss checkpoint
+
+Use the query encoder from the same CodeBERT checkpoint that produced the
+CodeBERT corpus embeddings:
+
+```bash
+export THEVAULT_DPR_ROOT="$(pwd -P)"
+export THEVAULT_CODEBERT_DIR=/mnt/beegfs/scratch/congthanh_le/east/baseline/models/codebert-base
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export THEVAULT_MODEL="$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/dpr_biencoder.9"
+
+CUDA_VISIBLE_DEVICES=0 python dense_retriever.py \
+  datasets=thevault_ruby \
+  encoder=hf_codebert \
+  ctx_sources=thevault \
+  qa_dataset=ruby_test \
+  "encoder.pretrained_model_cfg=$THEVAULT_CODEBERT_DIR" \
+  model_file="$THEVAULT_MODEL" \
+  'ctx_datatsets=[ruby_code]' \
+  "encoded_ctx_files=[$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/embeddings/ruby_*]" \
+  validation_mode=document_ids \
+  do_lower_case=False \
+  n_docs=100 \
+  "out_file=$THEVAULT_DPR_ROOT/outputs/thevault_ruby_codebert_legacy_inbatch/test_results.json" \
   hydra.job.chdir=False
 ```
 
@@ -415,4 +579,10 @@ Print Version B aggregate metrics:
 
 ```bash
 python -c "import json; result=json.load(open('outputs/thevault_ruby_legacy_inbatch/test_results.json')); print(json.dumps(result['aggregate_metrics'], indent=2))"
+```
+
+Print Version C aggregate metrics:
+
+```bash
+python -c "import json; result=json.load(open('outputs/thevault_ruby_codebert_legacy_inbatch/test_results.json')); print(json.dumps(result['aggregate_metrics'], indent=2))"
 ```

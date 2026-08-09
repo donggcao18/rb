@@ -1,0 +1,20 @@
+# @package _group_
+
+# CodeBERT uses the standard Hugging Face RoBERTa architecture.
+encoder_model_type: hf_roberta
+
+# Override this with a local directory when running without internet access.
+pretrained_model_cfg: microsoft/codebert-base
+
+pretrained_file:
+
+# Keep DPR embeddings at CodeBERT's native hidden size (768).
+projection_dim: 0
+
+sequence_length: 256
+
+dropout: 0.1
+
+fix_ctx_encoder: False
+
+pretrained: True
